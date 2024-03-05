@@ -1,6 +1,8 @@
 #include <Arduino.h>
 #include <SimpleFOC.h>
 #include "drivers/stspin32g4/STSPIN32G4.h"
+// #include "encoders/ma730/MA730.h"
+#include "encoders/ma730/MagneticSensorMA730.h"
 
 #define LED_WHITE PB_10 
 #define LED_RED PC_13
@@ -13,24 +15,30 @@
 STSPIN32G4 driver = STSPIN32G4();
 BLDCMotor motor = BLDCMotor(1); // for drive module
 HallSensor sensor = HallSensor(PC0, PC2, PC3, 1);
+MagneticSensorMA730 output_encoder = MagneticSensorMA730(MAG_CS);
 // interrupt routine intialisation
 void doA(){sensor.handleA();}
 void doB(){sensor.handleB();}
 void doC(){sensor.handleC();}
 
-float get_ang();
+// External digital encoder
 SPIClass SPI_1(MOIS_PIN, MISO_PIN, SCLK_PIN);
+PIDController PID_ang{1000.0,0.0,0.0,0,5000}; // PID controller for the output angle
 
+// angle set point variable
+float target_angle = 0;
 Commander command = Commander(Serial);
+void doTarget(char* cmd) { command.scalar(&target_angle, cmd); }
 void doMotor(char* cmd) { command.motor(&motor, cmd); }
-int counter = 0;
 
+int counter = 0;
 
 void setup() {
   Serial.begin();
   Serial.println("Start");
   command.add('M',doMotor,"motor");
-
+  // add target command T
+  command.add('T', doTarget, "target angle");
 
   // setup timer 6 to count micro seconds as the micro second timer inside stduino is slow
   __HAL_RCC_TIM6_CLK_ENABLE();
@@ -40,21 +48,15 @@ void setup() {
   /* Initialize all configured peripherals */
   pinMode(LED_WHITE, OUTPUT);
   pinMode(LED_RED, OUTPUT);
-
-  SPI_1.begin(MAG_CS);
-  SPI_1.beginTransaction(SPISettings(SSI_SSCK_FREQUENCY, MSBFIRST, SPI_MODE0));
-
-  motor.PID_velocity.P = 0.05f;
-  motor.PID_velocity.I = 0;
-  motor.PID_velocity.D = 0;
-   
+  
   // initialise encoder hardware
   sensor.init();
   sensor.enableInterrupts(doA, doB, doC);
   motor.linkSensor(&sensor);
+  output_encoder.init(&SPI_1);
 
   // driver
-   driver.voltage_power_supply = 17.0f;
+  driver.voltage_power_supply = 17.0f;
   driver.voltage_limit = 17.0f;
   driver.init();
   motor.voltage_limit = driver.voltage_limit / 2.0f;
@@ -62,12 +64,12 @@ void setup() {
   // set the torque control type
   motor.phase_resistance = 12.5; // 12.5 Ohms
   // set motion control loop to be used
-  motor.controller = MotionControlType::torque;
+  // motor.controller = MotionControlType::torque;
   motor.linkDriver(&driver);
   motor.init();
 
-  motor.PID_velocity.P = 0.005f;
-  motor.PID_velocity.I = 0;
+  motor.PID_velocity.P = 0.001f;
+  motor.PID_velocity.I = 0.0f;
   motor.PID_velocity.D = 0;
 
   // initialize motor
@@ -77,12 +79,15 @@ void setup() {
   // driver.voltage_limit = 6;
 
   Serial.println(F("Motor ready."));
+  Serial.println(F("Set the target angle using serial terminal:"));
 }
 
 void loop() {
     // main FOC algorithm function
   motor.loopFOC();
-  motor.move(50.0f); // Try to drive it as fast as possible
+  
+  float vel_set = PID_ang(output_encoder.getAngle()-target_angle);
+  motor.move(vel_set);
   if(driver.isFault()){
     digitalWrite(LED_WHITE, HIGH);
     digitalWrite(LED_RED, HIGH);
@@ -94,17 +99,10 @@ void loop() {
   motor.monitor();
   // real-time commander calls
   command.run();
-  if(counter++%1000 == 0){
-    // Serial.println(get_ang());
-    // Serial.println((sensor.getVelocity()/_2PI)*60);
+  if(counter++%10000 == 0){
+    Serial.print("Ang:");
+    Serial.println(output_encoder.getAngle()); 
+
   }
-}
-
-
-float get_ang(){
-  byte response1 = SPI_1.transfer(MAG_CS, 0x00, SPI_CONTINUE);
-  //transfer 0x00 to the device on pin 10, store byte received in response2, deselect the chip
-  byte response2 = SPI_1.transfer(MAG_CS, 0x00);
-  int ang_raw = (response1<<8) + response2;
-  return (ang_raw*180.0)/65536.0;
+  output_encoder.update();
 }
